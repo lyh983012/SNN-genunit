@@ -77,7 +77,7 @@ class LIAFResNet(nn.Module):
 
         self.conv1 = LIAFConvCell(inChannels=self.cfgCnn[0],
                                     outChannels=self.cfgCnn[1],
-                                    kernelSize=[7,7],
+                                    kernelSize=[self.cfgCnn[2],self.cfgCnn[2]],
                                     stride= 2,
                                     padding = 3,
                                     actFun=self.actFun,

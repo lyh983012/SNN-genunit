@@ -23,12 +23,12 @@ class Config(object):
         self.learning_rate = 3e-2                                       # 学习率，最重要的参数，部分demo不是在这里设置
         self.require_improvement = 1000                                 # 若超过1000batch效果还没提升，则提前结束训练，仅LSTM实现
         self.num_epochs =  25                                           # epoch数
-        self.batch_size = 26                                           # mini-batch大小，部分demo不是在这里设置
+        self.batch_size = 22                                           # mini-batch大小，部分demo不是在这里设置
         self.Qbit=0                                                     # 是否使用多阈值函数（>2支持，Qbit的值实际上是阈值个数）
         '''cfg for net'''
         self.block = LIAFResBlock
         self.num_classes = 1000
-        self.cfgCnn = [2,64]
+        self.cfgCnn = [2,64,7]
         self.cfgRes = [2,2,2,2]
         self.cfgFc = [self.num_classes]
         self.timeWindows = 8

@@ -28,7 +28,7 @@ class Config(object):
         '''cfg for net'''
         self.block = LIAF.LIAFResNeck
         self.num_classes = 1000
-        self.cfgCnn = [2, 64]
+        self.cfgCnn = [2,64,7]
         self.cfgRes = [3,4,6,3]
         self.cfgFc = [self.num_classes]
         self.timeWindows = 8
