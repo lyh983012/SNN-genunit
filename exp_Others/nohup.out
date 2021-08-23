@@ -1,0 +1,24 @@
+usage: tensorboard [-h] [--helpfull] [--logdir PATH] [--logdir_spec PATH_SPEC] [--host ADDR] [--bind_all] [--port PORT]
+                   [--purge_orphaned_data BOOL] [--db URI] [--db_import] [--inspect] [--version_tb] [--tag TAG]
+                   [--event_file PATH] [--path_prefix PATH] [--window_title TEXT] [--max_reload_threads COUNT]
+                   [--reload_interval SECONDS] [--reload_task TYPE] [--reload_multifile BOOL]
+                   [--reload_multifile_inactive_secs SECONDS] [--generic_data TYPE]
+                   [--samples_per_plugin SAMPLES_PER_PLUGIN] [--debugger_data_server_grpc_port PORT]
+                   [--debugger_port PORT]
+                   {serve,dev} ...
+tensorboard: error: unrecognized arguments: -logdir=runs -bind_all
+TensorBoard 2.2.1 at http://CBICR13:6006/ (Press CTRL+C to quit)
+E0306 22:33:36.711866 139877503878912 _internal.py:113] Error on request:
+Traceback (most recent call last):
+  File "/home/lyh/anaconda3/envs/pytorch/lib/python3.6/site-packages/werkzeug/serving.py", line 323, in run_wsgi
+    execute(self.server.app)
+  File "/home/lyh/anaconda3/envs/pytorch/lib/python3.6/site-packages/werkzeug/serving.py", line 315, in execute
+    write(data)
+  File "/home/lyh/anaconda3/envs/pytorch/lib/python3.6/site-packages/werkzeug/serving.py", line 296, in write
+    self.wfile.write(data)
+  File "/home/lyh/anaconda3/envs/pytorch/lib/python3.6/socketserver.py", line 803, in write
+    self._sock.sendall(b)
+TimeoutError: [Errno 110] Connection timed out
+E0307 09:07:35.328515 139877512533760 _internal.py:113] ::ffff:45.155.205.209 - - [07/Mar/2021 09:07:35] code 400, message Bad HTTP/0.9 request type ('\x03\x00\x00/*à\x00\x00\x00\x00\x00Cookie:')
+E0307 12:49:31.757315 139877144323840 _internal.py:113] ::ffff:45.155.205.209 - - [07/Mar/2021 12:49:31] code 400, message Bad HTTP/0.9 request type ('\x03\x00\x00/*à\x00\x00\x00\x00\x00Cookie:')
+TensorBoard 2.2.1 at http://CBICR13:6006/ (Press CTRL+C to quit)

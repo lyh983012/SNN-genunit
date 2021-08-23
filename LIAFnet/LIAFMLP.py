@@ -129,7 +129,7 @@ class LIAFMLP(nn.Module):
 
     def forward(self,data):
         
-        self.batchSize = data.size()[0]
+        self.batchSize = data.size(0)
         frames = data
         if self._data_sparse:
             if self.useThreshFiring:
@@ -144,4 +144,4 @@ class LIAFMLP(nn.Module):
         outputsum = output.mean(dim=1)
         if self.onlyLast:
             outputsum = output[:,-1,:]
-        return outputsum
+        return outputsum.float()

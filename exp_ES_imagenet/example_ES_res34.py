@@ -6,9 +6,10 @@
 from __future__ import print_function
 import sys
 sys.path.append("..")
+import LIAF
+
 from util.util import lr_scheduler
 from datasets.es_imagenet import ESImagenet_Dataset
-import LIAF
 from LIAFnet.LIAFResNet import *
 
 import torch.distributed as dist 
@@ -35,16 +36,16 @@ world_size = dist.get_world_size()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(dist.get_rank(),' is ready')
 
-if local_rank == 0 :
-    writer = SummaryWriter('runs/'+save_folder)
-    master = True
-    print('start recording')
+
 
 ##################### Step2. load in dataset #####################
 
 modules = import_module('LIAFnet.LIAFResNet_34')
 config  = modules.Config()
 workpath = os.path.abspath(os.getcwd())
+
+
+config.batch_size = 16
 
 num_epochs = config.num_epochs
 batch_size = config.batch_size
@@ -63,7 +64,7 @@ test_dataset = ESImagenet_Dataset(mode='test',data_set_path='/data/ES-imagenet-0
 
 train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
 test_sampler  = torch.utils.data.distributed.DistributedSampler(test_dataset)
-train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=1,pin_memory=True,drop_last=True,sampler=train_sampler)
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size,num_workers=1,pin_memory=True,drop_last=True,sampler=train_sampler)
 test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=1,pin_memory=True)
 
 ##################### Step3. establish module #####################
@@ -82,6 +83,11 @@ with torch.cuda.device(local_rank):
 
 ################step4. training and validation ################
 
+if local_rank == 0 :
+    writer = SummaryWriter('runs/'+save_folder)
+    master = True
+    print('start recording')
+    
 def val(optimizer,snn,test_loader,test_dataset,batch_size,epoch):
     if master:
         print('===> evaluating models...')

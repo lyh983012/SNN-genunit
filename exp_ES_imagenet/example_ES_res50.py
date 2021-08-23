@@ -6,6 +6,8 @@
 from __future__ import print_function
 import sys
 sys.path.append("..")
+import LIAF
+
 from util.util import lr_scheduler
 from datasets.es_imagenet_new import ESImagenet_Dataset
 import LIAF

@@ -62,3 +62,9 @@ class DVS_MNIST_Dataset(data.Dataset):
             return len(self.test_filenames)
         
     
+    
+test_dataset = DVS_MNIST_Dataset(mode='train',scale = 4,data_set_path='/data/MNIST_DVS_mat/',timestep = 50)
+
+for data,label in test_dataset:
+    #print(data,label)
+    pass

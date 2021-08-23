@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import math
 import numpy as np
 import LIAF
+from torch.cuda.amp import autocast
 
 print_model = False
 
@@ -103,7 +104,7 @@ class LIAFCNN(nn.Module):
         self.actFun = config.actFun
         self.dropOut = config.dropOut
         self.useBatchNorm = config.useBatchNorm
-        self.timeWindows = config.timeWindows
+        self.timeWindows = 0
         self.cfgCnn = config.cfgCnn
         self.cfgFc = config.cfgFc
         self.nCnnLayers = len(config.cfgCnn)
@@ -125,7 +126,6 @@ class LIAFCNN(nn.Module):
                                     p_kernelSize=p_kernelSize,
                                     padding=self.padding,
                                     actFun=self.actFun,
-                                    timeWindows = self.timeWindows,
                                     usePool=usePooling,
                                     dropOut=self.dropOut,
                                     inputSize=dataSize,
@@ -141,30 +141,32 @@ class LIAFCNN(nn.Module):
                                         LIAF.LIAFCell(self.cfgFc_[dice2],
                                         self.cfgFc_[dice2+1],
                                         actFun=self.actFun,
-                                        timeWindows = self.timeWindows,
                                         dropOut=self.dropOut,
-                                        useBatchNorm=self.useBatchNorm))
-        print(self.network)
+                                        useBatchNorm=False))
+        if LIAF.allow_print:
+            print(self.network)
 
 
     def forward(self,data):
+        with autocast():
+            self.batchSize = data.size(0)
+            self.timeWindows= data.size(2)
 
-        self.batchSize = data.size()[0]
-        frames = data
-        if self._data_sparse:
-            if self.useThreshFiring:
-                tmp = torch.ones(data.shape, device=device).float()
-                frames = data >= tmp
-            else:  
-                frames = data > torch.rand(data.size(), device=device)
-        output = frames
-        
-        for layer in self.network:
-            if isinstance(layer, LIAF.LIAFCell):
-                output = output.view(self.batchSize,self.timeWindows,-1)
-            output = layer(output)
+            frames = data
+            if self._data_sparse:
+                if self.useThreshFiring:
+                    tmp = torch.ones(data.shape, device=device).float()
+                    frames = data >= tmp
+                else:  
+                    frames = data > torch.rand(data.size(), device=device)
+            output = frames
 
-        outputmean = output.mean(dim=1)
-        if self.onlyLast:
-            outputmean = output[:,-1,:]
-        return outputmean
+            for layer in self.network:
+                if isinstance(layer, LIAF.LIAFCell):
+                    output = output.view(self.batchSize,self.timeWindows,-1)
+                output = layer(output)
+
+            outputmean = output.mean(dim=1)
+            if self.onlyLast:
+                outputmean = output[:,-1,:]
+        return outputmean.float()

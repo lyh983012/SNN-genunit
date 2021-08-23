@@ -20,9 +20,9 @@ class Config(object):
 
     def __init__(self, path=None, dataset=None, embedding=None):
         '''cfg for learning'''
-        self.learning_rate = 3e-2                                       # 学习率，最重要的参数，部分demo不是在这里设置
+        self.learning_rate = 1e-1                                       # 学习率，最重要的参数，部分demo不是在这里设置
         self.require_improvement = 1000                                 # 若超过1000batch效果还没提升，则提前结束训练，仅LSTM实现
-        self.num_epochs =  25                                           # epoch数
+        self.num_epochs =  30                                           # epoch数
         self.batch_size = 22                                           # mini-batch大小，部分demo不是在这里设置
         self.Qbit=0                                                     # 是否使用多阈值函数（>2支持，Qbit的值实际上是阈值个数）
         '''cfg for net'''
@@ -38,5 +38,6 @@ class Config(object):
         self._data_sparse= False
         self.padding= 0
         self.dataSize= [224,224]
+        self.attention_model = None
 
 

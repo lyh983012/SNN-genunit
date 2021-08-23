@@ -2,10 +2,13 @@
 # Date  : 2020-09-19
 # 使用了分布式学习的ImageNet训练代码
 # 使用以下命令直接执行
-# CUDA_VISIBLE_DEVICES=3,4,5,6 python -m torch.distributed.launch --nproc_per_node=4 example_ES_res18_pretrain.py
+# CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 python -m torch.distributed.launch --nproc_per_node=7 example_ES_res18_pretrain.py
 from __future__ import print_function
 import sys
 sys.path.append("..")
+import LIAF
+
+
 import torch.distributed as dist 
 import torch.nn as nn
 import argparse, pickle, torch, time, os,sys
@@ -13,11 +16,13 @@ from importlib import import_module
 from tensorboardX import SummaryWriter
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+# pytorch>1.6.0
+from torch.cuda.amp import autocast
 ##################### Step1. Env Preparation #####################
 
 writer = None #仅在master进程上输出
 master = False 
-save_folder = 'LIAF_from_ANN_and_warmup'
+save_folder = 'LIAF_from_ANN_and_warmup_few_epoch'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--local_rank',type = int,default=0)
@@ -34,7 +39,6 @@ print(local_rank,' is ready')
 ##################### Step2. load in dataset #####################
 
 from datasets.es_imagenet import ESImagenet_Dataset
-import LIAF
 from LIAFnet.LIAFResNet import *
 
 modules = import_module('LIAFnet.LIAFResNet_18')
@@ -66,7 +70,7 @@ print("Total number of paramerters in networks is {}  ".format(sum(x.numel() for
 snn = torch.nn.SyncBatchNorm.convert_sync_batchnorm(snn)
 
 #https://www.zhihu.com/question/67209417
-checkpoint = torch.load('./LIAF_warmup_on_imagenet_18/pre_warmup_0.pkl', map_location=torch.device('cpu'))
+checkpoint = torch.load('./xx.pkl', map_location=torch.device('cpu'))
 snn.load_state_dict(checkpoint)
 
 criterion = nn.CrossEntropyLoss()
@@ -79,7 +83,7 @@ optimizer = torch.optim.SGD(snn.parameters(),
 
 lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
                     optimizer, 
-                    milestones=[8,16], 
+                    milestones=[10,20], 
                     gamma=0.1, 
                     last_epoch=-1)
 
@@ -104,12 +108,12 @@ def val(optimizer,snn,test_loader,test_dataset,batch_size,epoch):
         if master:
             for name,parameters in snn.module.named_parameters():
                 writer.add_histogram(name, parameters.detach().cpu().numpy(),epoch)
-        for batch_idx, (inputs, targets) in enumerate(test_loader):
+        for batch_idx, (images, targets) in enumerate(test_loader):
             if ((batch_idx+1)<=len(test_dataset)//batch_size):
                 optimizer.zero_grad()
                 try:
                     targets=targets.view(batch_size)#tiny bug
-                    outputs = snn(inputs.type(LIAF.dtype))
+                    outputs = snn(images)
                     _ , predicted = outputs.cpu().max(1)
                     total += float(targets.size(0))
                     correct += float(predicted.eq(targets).sum())
@@ -126,6 +130,7 @@ def val(optimizer,snn,test_loader,test_dataset,batch_size,epoch):
 ################step4. training and validation ################
 
 for epoch in range(num_epochs):
+    torch.cuda.empty_cache()
     #training
     running_loss = 0
     snn.train()
@@ -140,9 +145,10 @@ for epoch in range(num_epochs):
         if ((i+1)<=len(train_dataset)//batch_size):
             snn.zero_grad()
             optimizer.zero_grad()
-            outputs = snn(images.type(LIAF.dtype)).cpu()
-            labels = labels.view(batch_size)
-            loss = criterion(outputs, labels)
+            with autocast():
+                outputs = snn(images).cpu()
+                labels = labels.view(batch_size)
+                loss = criterion(outputs, labels)
 
             _ , predict = outputs.max(1)
             correct += predict.eq(labels).sum()

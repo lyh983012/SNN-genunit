@@ -10,6 +10,7 @@ import os
 import math
 import util.thBN as thBN
 from LIAF import *
+from torch.cuda.amp import autocast
 
 #ResNet
 class LIAFResNet(nn.Module):
@@ -22,6 +23,7 @@ class LIAFResNet(nn.Module):
                                 inChannels= inChannels,
                                 actFun=self.actFun,
                                 inputSize=self.dataSize,
+                                attention_model = self.attention_model,
                                 useBatchNorm= self.useBatchNorm)
         self.dataSize=ResBlock.outputSize
         layers.append(ResBlock)
@@ -33,6 +35,7 @@ class LIAFResNet(nn.Module):
                                 inChannels= inChannels,
                                 actFun=self.actFun,
                                 inputSize=self.dataSize,
+                                attention_model = self.attention_model,
                                 useBatchNorm= self.useBatchNorm)
             self.dataSize=ResBlock.outputSize
             layers.append(ResBlock)
@@ -45,6 +48,7 @@ class LIAFResNet(nn.Module):
                                 outChannels=outChannels,
                                 actFun=self.actFun,
                                 inputSize=self.dataSize,
+                                attention_model = self.attention_model,
                                 useBatchNorm= self.useBatchNorm)
         self.dataSize=ResBlock.outputSize
         layers.append(ResBlock)
@@ -53,6 +57,7 @@ class LIAFResNet(nn.Module):
                                 outChannels=outChannels,
                                 actFun=self.actFun,
                                 inputSize=self.dataSize,
+                                attention_model = self.attention_model,
                                 useBatchNorm= self.useBatchNorm)
             self.dataSize=ResBlock.outputSize
             layers.append(ResBlock)
@@ -74,7 +79,8 @@ class LIAFResNet(nn.Module):
         self.useThreshFiring = config.useThreshFiring
         self._data_sparse=config._data_sparse
         self.cahnnel_now = self.cfgCnn[1]
-
+        self.attention_model=config.attention_model
+        
         self.conv1 = LIAFConvCell(inChannels=self.cfgCnn[0],
                                     outChannels=self.cfgCnn[1],
                                     kernelSize=[self.cfgCnn[2],self.cfgCnn[2]],
@@ -84,6 +90,7 @@ class LIAFResNet(nn.Module):
                                     usePool= True,
                                     useBatchNorm= self.useBatchNorm,
                                     inputSize= self.dataSize,
+                                    attention_model = self.attention_model,
                                     p_kernelSize = 3,
                                     p_method = 'max',
                                     p_padding = 0,
@@ -119,28 +126,28 @@ class LIAFResNet(nn.Module):
         return input
 
     def forward(self,input):
+        with autocast():
+            self.device  = self.fc.weight.device
+            self.batchSize=input.size(0)
+            self.timeWindows=input.size(2)
+            if input.device != self.device:
+                input = input.to(self.device)
+            if self._data_sparse:
+                self._sparse(input)
+            #.......................................#
 
-        self.device  = self.fc.weight.device
-        self.batchSize=input.size()[0]
-        self.timeWindows=input.size()[2]
-        if input.device != self.device:
-            input = input.to(self.device)
-        if self._data_sparse:
-            self._sparse(input)
-        #.......................................#
+            output = self.conv1(input)
 
-        output = self.conv1(input)
+            output = self.layer1(output)
+            output = self.layer2(output)
+            output = self.layer3(output)
+            output = self.layer4(output)
+            temp = torch.zeros(self.batchSize,self.timeWindows,self.cfgFc_[0]).to(self.device)
+            for time in range(self.timeWindows):
+                pool = F.avg_pool2d(output[:,:,time,:,:],self.post_pooling_kenerl)
+                temp[:,time,:] = pool.view(self.batchSize,-1)
 
-        output = self.layer1(output)
-        output = self.layer2(output)
-        output = self.layer3(output)
-        output = self.layer4(output)
-        temp = torch.zeros(self.batchSize,self.timeWindows,self.cfgFc_[0]).to(self.device)
-        for time in range(self.timeWindows):
-            pool = F.avg_pool2d(output[:,:,time,:,:],self.post_pooling_kenerl)
-            temp[:,time,:] = pool.view(self.batchSize,-1)
-
-        output = temp.view(self.batchSize,self.timeWindows,-1)
-        output = self.fc(output.mean(dim=1).type(dtype))
+            output = temp.view(self.batchSize,self.timeWindows,-1)
+            output = self.fc(output.mean(dim=1).type(dtype))
 
         return output.float()

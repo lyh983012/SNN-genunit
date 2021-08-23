@@ -2,10 +2,12 @@
 # Date  : 2020-09-19
 # 使用了分布式学习的ImageNet训练代码
 # 使用以下命令直接执行
-# CUDA_VISIBLE_DEVICES=3,4,5,6 python -m torch.distributed.launch --nproc_per_node=4 example_ES_res18_pretrain.py
+# CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 python -m torch.distributed.launch --nproc_per_node=7 example_ES_res18.py
 from __future__ import print_function
 import sys
 sys.path.append("..")
+import LIAF
+
 import torch.distributed as dist 
 import torch.nn as nn
 import argparse, pickle, torch, time, os,sys
@@ -13,11 +15,13 @@ from importlib import import_module
 from tensorboardX import SummaryWriter
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+# pytorch>1.6.0
+from torch.cuda.amp import autocast
 ##################### Step1. Env Preparation #####################
 
 writer = None #仅在master进程上输出
 master = False 
-save_folder = 'LIAF_18_pure'
+save_folder = 'LIF_18_pure'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--local_rank',type = int,default=0)
@@ -41,6 +45,7 @@ modules = import_module('LIAFnet.LIAFResNet_18')
 config  = modules.Config()
 workpath = os.path.abspath(os.getcwd())
 config.cfgCnn = [2, 64, 7, True]
+config.actFun= LIAF.LIFactFun.apply
 
 num_epochs = config.num_epochs
 batch_size = config.batch_size
@@ -62,13 +67,17 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, s
 ##################### Step3. establish module #####################
 
 snn = LIAFResNet(config)
+
+#checkpoint = torch.load('./LIAF_18_pure/12.pkl', map_location=torch.device('cpu'))
+#snn.load_state_dict(checkpoint)
+
 print("Total number of paramerters in networks is {}  ".format(sum(x.numel() for x in snn.parameters())))
 
 snn = torch.nn.SyncBatchNorm.convert_sync_batchnorm(snn)
 criterion = nn.CrossEntropyLoss()
 
 optimizer = torch.optim.SGD(snn.parameters(),
-                lr=1e-1,
+                lr=3e-2,
                 momentum=0.9,
                 weight_decay=1e-4,
                 nesterov=True)
@@ -80,7 +89,6 @@ lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
                     last_epoch=-1)
 
 with torch.cuda.device(local_rank):
-
     snn.to(device)
     snn = DDP(snn,device_ids=[local_rank], output_device=local_rank,find_unused_parameters=True)
     
@@ -132,15 +140,18 @@ for epoch in range(num_epochs):
         print('===> training models...')
     correct = 0.0
     total = 0.0
+    torch.cuda.empty_cache()
     # 新增2：设置sampler的epoch，DistributedSampler需要这个来维持各个进程之间的相同随机数种子
     train_loader.sampler.set_epoch(epoch)
     for i, (images, labels) in enumerate(train_loader):
         if ((i+1)<=len(train_dataset)//batch_size):
             snn.zero_grad()
             optimizer.zero_grad()
-            outputs = snn(images.type(LIAF.dtype)).cpu()
-            labels = labels.view(batch_size)
-            loss = criterion(outputs, labels)
+            
+            with autocast():
+                outputs = snn(images.type(LIAF.dtype)).cpu()
+                labels = labels.view(batch_size)
+                loss = criterion(outputs, labels)
 
             _ , predict = outputs.max(1)
             correct += predict.eq(labels).sum()

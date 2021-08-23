@@ -1,31 +1,34 @@
 # Author: lyh 
-# Date  : 2020-09-19
+# Date  : 2021-04-28
 # 使用了分布式学习的ImageNet训练代码
 # 使用以下命令直接执行
-# CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 python -m torch.distributed.launch --nproc_per_node=7 example_Imagenet_res34.py
+# CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node=4 example_Imagenet_res34.py
+
 from __future__ import print_function
+import sys
+sys.path.append("..")
+from util.util import lr_scheduler
+from datasets.es_imagenet import ESImagenet_Dataset
+import LIAF
+from LIAFnet.LIAFResNet import *
+
 import torchvision
 import torchvision.transforms as transforms
+
 import torch.distributed as dist 
-import LIAF,util
-import argparse, pickle, torch, time, os,sys
-import numpy as np
-import pandas as pd
 import torch.nn as nn
+import argparse, pickle, torch, time, os,sys
 from importlib import import_module
 from tensorboardX import SummaryWriter
 from torch.nn.parallel import DistributedDataParallel as DDP
-
 
 ##################### Step1. Env Preparation #####################
 
 writer = None #仅在master进程上输出
 master = False 
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6"
-names = 'imagenet_exp_34_new'
-save_folder = 'imagenet_exp_34_new'
-train_path = '/home/lyh/dataset/dataset/imagenet2012_png/train' 
-test_path = '/home/lyh/dataset/dataset/imagenet2012_png/val/' 
+save_folder = 'pure_ResNet_34'
+train_path = '/data/imagenet2012_png/train' 
+test_path = '/data/imagenet2012_png/val' 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--local_rank',type = int,default=0)
@@ -34,24 +37,31 @@ torch.cuda.set_device(args.local_rank)
 torch.distributed.init_process_group('nccl',init_method='env://')
 local_rank = dist.get_rank()
 world_size = dist.get_world_size()
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 print(dist.get_rank(),' is ready')
 
 if local_rank == 0 :
-    writer = SummaryWriter(comment='./runs/imagenet_exp_34_new')
+    writer = SummaryWriter(comment='runs/'+save_folder)
     master = True
     print('start recording')
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 ##################### Step2. load in dataset #####################
 
-modules = import_module('models.LIAFResNet_34')
+modules = import_module('LIAFnet.LIAFResNet_34')
 config  = modules.Config()
-config.cfgCnn = [3, 64, 7]
 workpath = os.path.abspath(os.getcwd())
+
+config.batch_size = 256//4
+config.cfgCnn = [3, 64, 7]
+config.actFun = nn.ReLU(inplace=True)
 
 num_epochs = config.num_epochs
 batch_size = config.batch_size
-timeWindows = config.timeWindows
+
+
+timeWindows = 1 #ANN mode
+
 epoch = 0
 best_acc = 0  # best test accuracy
 start_epoch = 0  # start from epoch 0 or last checkpoint epoch
@@ -79,23 +89,43 @@ train_dataset = torchvision.datasets.ImageFolder(root= train_path, transform=tra
 train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
 test_dataset = torchvision.datasets.ImageFolder(root= test_path,transform=transform_test)
 test_sampler  = torch.utils.data.distributed.DistributedSampler(test_dataset)
-train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=1,pin_memory=True,drop_last=True,sampler=train_sampler)
-test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=1,pin_memory=True)
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=7,pin_memory=True,drop_last=True,sampler=train_sampler)
+test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=7,pin_memory=True)
 
 ##################### Step3. establish module #####################
 
-snn = LIAF.LIAFResNet(config)
+
+
+snn = LIAFResNet(config)
+print("Total number of paramerters in networks is {}  ".format(sum(x.numel() for x in snn.parameters())))
 snn=torch.nn.SyncBatchNorm.convert_sync_batchnorm(snn)
+
+checkpoint = torch.load('./pure_ResNet_34/pure_ResNet_34_65.pkl', map_location=torch.device('cpu'))
+snn.load_state_dict(checkpoint)
 snn.to(device)
 
 criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(snn.parameters(),
-            lr=config.learning_rate)
+optimizer = torch.optim.SGD(snn.parameters(),
+                lr=0.1,
+                momentum=0.9,
+                weight_decay=1e-4,
+                nesterov=True)
+
+lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                    optimizer, 
+                    milestones=[20,40], 
+                    gamma=0.1, 
+                    last_epoch=-1)
+
+
 #防止进程冲突
 with torch.cuda.device(local_rank):
     snn = DDP(snn,device_ids=[local_rank], output_device=local_rank,find_unused_parameters=True)
 
+
 ################step4. training and validation ################
+
+bestacc = 0
 
 def val(optimizer,snn,test_loader,test_dataset,batch_size,epoch):
     print('===> evaluating models...')
@@ -115,44 +145,26 @@ def val(optimizer,snn,test_loader,test_dataset,batch_size,epoch):
                 image_train = torch.zeros(imsize[0],imsize[1],timeWindows,imsize[2],imsize[3])
                 for time in range(timeWindows):
                     image_train[:,:,time,:,:] = inputs
-                    try:
-                        outputs = snn(image_train.type(LIAF.dtype))
-                        _ , predicted = outputs.cpu().max(1)
-                        total += float(targets.size(0))
-                        correct += float(predicted.eq(targets).sum())
-                    except:
-                        print('sth. wrong')
-                        print('val_error:',batch_idx, end='')
-                        print(predicted)
-                        print(targets.size())
+                outputs = snn(image_train.type(LIAF.dtype))
+                _ , predicted = outputs.cpu().max(1)
+                total += float(targets.size(0))
+                correct += float(predicted.eq(targets).sum())
     acc = 100. * float(correct) / float(total)
     acc_record.append(acc)
     if master:
         writer.add_scalar('acc_th', acc,epoch)
-    return optimizer
-
-
-state = {
-        'state': snn.module.state_dict(),
-        'epoch': epoch,                   # 将epoch一并保存
-        'best_acc' : best_acc,            # best test accuracy
-        'acc_record': acc_record, 
-        'loss_train_record': loss_train_record,
-        'loss_test_record': loss_test_record ,
-        'optimizer':optimizer.state_dict()
-}
-
-val(optimizer,snn,test_loader,test_dataset,batch_size,epoch)
+    return acc
 
 for epoch in range(num_epochs):
-    #training
+
     running_loss = 0
+    correct = 0.0
+    total = 0.0
+    
     snn.train()
     start_time = time.time() 
     print('===> training models...')
-    correct = 0.0
-    total = 0.0
-    # 新增2：设置sampler的epoch，DistributedSampler需要这个来维持各个进程之间的相同随机数种子
+
     train_loader.sampler.set_epoch(epoch)
     for i, (images, labels) in enumerate(train_loader):
         if ((i+1)<=len(train_dataset)//batch_size):
@@ -162,10 +174,8 @@ for epoch in range(num_epochs):
             image_train = torch.zeros(imsize[0],imsize[1],timeWindows,imsize[2],imsize[3])
             for time2 in range(timeWindows):
                 image_train[:,:,time2,:,:] = images
-
             outputs = snn(image_train.type(LIAF.dtype)).cpu()
             loss = criterion(outputs, labels)
-
             _ , predict = outputs.max(1)
             correct += predict.eq(labels).sum()
             total += float(predict.size(0))
@@ -188,23 +198,13 @@ for epoch in range(num_epochs):
                 total = 0.0
                 running_loss = 0
         training_iter +=1 
-    torch.cuda.empty_cache()
-    #evaluation
-    val(optimizer,snn,test_loader,test_dataset,batch_size,epoch)
-    optimizer = util.lr_scheduler(optimizer, epoch+start_epoch, config.learning_rate, 10)
-    state = {
-        'state': snn.module.state_dict(),
-        'epoch': epoch+start_epoch,       # 将epoch一并保存
-        'best_acc' : best_acc,            # best test accuracy
-        'acc_record': acc_record, 
-        'loss_train_record': loss_train_record,
-        'loss_test_record': loss_test_record ,
-        'optimizer':optimizer.state_dict()
-    }
-    if master:
-        if not os.path.isdir(save_folder):
-            os.mkdir(save_folder)
-        print('===> Saving models...')
-        torch.save(state, workpath+'/'+save_folder+'/'+str(epoch+start_epoch)+'modelsaved.t7')
-        print('===> Saved')
     
+    torch.cuda.empty_cache()
+    lr_scheduler.step()
+    acc = val(optimizer,snn,test_loader,test_dataset,batch_size,epoch)
+    
+    if master:
+        if acc > bestacc:
+            bestacc = acc
+            print('===> Saving models...')
+            torch.save(snn.module.state_dict(), './pure_ResNet_34/pure_ResNet_34_'+str(int(bestacc))+'.pkl')

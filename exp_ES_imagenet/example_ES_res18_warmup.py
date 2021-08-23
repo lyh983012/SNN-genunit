@@ -6,9 +6,10 @@
 from __future__ import print_function
 import sys
 sys.path.append("..")
+import LIAF
+
 from util.util import lr_scheduler
 from datasets.es_imagenet import ESImagenet_Dataset
-import LIAF
 from LIAFnet.LIAFResNet import *
 
 import torch.distributed as dist 
@@ -69,7 +70,7 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, s
 
 snn = LIAFResNet(config)
 print("Total number of paramerters in networks is {}  ".format(sum(x.numel() for x in snn.parameters())))
-snn.load_state_dict(torch.load('./imagenet_exp_18_new/64.pkl'))
+snn.load_state_dict(torch.load('./CNN_ResNet18/64.pkl'))
 for p in snn.parameters():
     p.requires_grad=False
 snn.conv1 = LIAF.LIAFConvCell(inChannels=2,
@@ -88,7 +89,6 @@ snn.conv1 = LIAF.LIAFConvCell(inChannels=2,
 snn = torch.nn.SyncBatchNorm.convert_sync_batchnorm(snn)
 snn.to(device)
 criterion = nn.CrossEntropyLoss()
-
 optimizer = torch.optim.SGD(filter(lambda p:p.requires_grad, snn.parameters()),
                 lr=0.1,
                 momentum=0.9,

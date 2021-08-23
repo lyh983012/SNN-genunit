@@ -1,29 +1,37 @@
-# CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7  python -m torch.distributed.launch --nproc_per_node=8 example_Imagenet_res18.py
+# CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6  python -m torch.distributed.launch --nproc_per_node=7 example_Imagenet_res18.py
+
+
+#direcyt train on imagenet
 
 from __future__ import print_function
-import sys
+import argparse, pickle, torch, time, os,sys
 sys.path.append("..")
-from util.util import lr_scheduler
-from datasets.es_imagenet import ESImagenet_Dataset
 import LIAF
 from LIAFnet.LIAFResNet import *
+from util.util import lr_scheduler
+
+from tensorboardX import SummaryWriter
+from datasets.es_imagenet import ESImagenet_Dataset
 
 import torchvision
 import torchvision.transforms as transforms
-
 import torch.distributed as dist 
 import torch.nn as nn
-import argparse, pickle, torch, time, os,sys
-from importlib import import_module
-from tensorboardX import SummaryWriter
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.cuda.amp import autocast
 
-##################### Step1. Env Preparation #####################
+from importlib import import_module
+import numpy as np
 
 writer = None #仅在master进程上输出
 master = False 
-names = 'Res18_imagenet_LIAF1timepretrain'
-save_folder = 'Res18_imagenet_LIAF1timepretrain'
+#save_folder = 'ResNet18_imagenet_LIF'
+save_folder = 'ResNet18_imagenet_CNN_spike'
+#save_folder = 'ResNet18_imagenet_LIAF'
+
+#timeWindows = 8
+timeWindows = 1
+
 train_path = '/data/imagenet2012_png/train' 
 test_path = '/data/imagenet2012_png/val' 
 
@@ -38,7 +46,7 @@ world_size = dist.get_world_size()
 print(dist.get_rank(),' is ready')
 
 if local_rank == 0 :
-    writer = SummaryWriter('runs/'+save_folder)
+    writer = SummaryWriter(comment=save_folder)
     master = True
     print('start recording')
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -49,10 +57,11 @@ modules = import_module('LIAFnet.LIAFResNet_18')
 config  = modules.Config()
 workpath = os.path.abspath(os.getcwd())
 config.cfgCnn = [3, 64, 7, True]
-
+config.actFun = LIAF.LIFactFun.apply
+config.batch_size = 256//7
+config.actFun= LIAF.LIFactFun.apply
+batch_size = config.batch_size
 num_epochs = config.num_epochs
-batch_size = 256//4
-timeWindows = 1
 
 
 best_acc = 0  # best test accuracy
@@ -91,23 +100,31 @@ print("Total number of paramerters in networks is {}  ".format(sum(x.numel() for
 snn=torch.nn.SyncBatchNorm.convert_sync_batchnorm(snn)
 snn.to(device)
 
+
+print('using uniformed init')
+checkpoint = torch.load('./ResNet18_imagenet_CNN/sgd_65.pkl', map_location=torch.device('cpu'))
+#checkpoint = torch.load('./ResNet18_imagenet_LIF/16.pkl', map_location=torch.device('cpu'))
+snn.load_state_dict(checkpoint)
+
+
 criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.SGD(snn.parameters(),
-                lr=0.1,
-                momentum=0.9,
-                weight_decay=1e-4,
-                nesterov=True)
+#optimizer = torch.optim.SGD(snn.parameters(),
+#                lr=3e-2,
+#                momentum=0.9,
+#                weight_decay=1e-4,
+#                nesterov=True)
+optimizer = torch.optim.Adam(snn.parameters(),
+            lr=3e-2)
 
 lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
                     optimizer, 
-                    milestones=[20,40], 
+                    milestones=[5,10], 
                     gamma=0.1, 
                     last_epoch=-1)
 
 #防止进程冲突
 with torch.cuda.device(local_rank):
     snn = DDP(snn,device_ids=[local_rank], output_device=local_rank,find_unused_parameters=True)
-
 
 ################step4. training and validation ################
 
@@ -122,7 +139,6 @@ def val(optimizer,snn,test_loader,test_dataset,batch_size,epoch):
     with torch.no_grad():
         if master:
             for name,parameters in snn.module.named_parameters():
-                print(name,':',parameters.size())
                 writer.add_histogram(name, parameters.detach().cpu().numpy(),epoch)
         for batch_idx, (inputs, targets) in enumerate(test_loader):
             if ((batch_idx+1)<=len(test_dataset)//batch_size):
@@ -160,8 +176,11 @@ for epoch in range(num_epochs):
             image_train = torch.zeros(imsize[0],imsize[1],timeWindows,imsize[2],imsize[3])
             for time2 in range(timeWindows):
                 image_train[:,:,time2,:,:] = images
-            outputs = snn(image_train.type(LIAF.dtype)).cpu()
-            loss = criterion(outputs, labels)
+           
+            with autocast():
+                outputs = snn(image_train.type(LIAF.dtype)).cpu()
+                loss = criterion(outputs, labels)
+                
             _ , predict = outputs.max(1)
             correct += predict.eq(labels).sum()
             total += float(predict.size(0))
@@ -184,13 +203,16 @@ for epoch in range(num_epochs):
                 total = 0.0
                 running_loss = 0
         training_iter +=1 
-    
     torch.cuda.empty_cache()
     lr_scheduler.step()
-    acc = val(optimizer,snn,test_loader,test_dataset,batch_size,epoch)
-    
-    if master:
-        if acc > bestacc:
-            bestacc = acc
-            print('===> Saving models...')
-            torch.save(snn.module.state_dict(), '/home/lyh/genunit/genunit_opt/example/imagenet_exp_18_new/'+str(int(bestacc))+'.pkl')
+    with torch.no_grad():
+        if master:
+            acc = val(optimizer,snn,test_loader,test_dataset,batch_size,epoch)
+            if not os.path.isdir(save_folder):
+                os.mkdir(save_folder)
+            if acc > bestacc:
+                bestacc = acc
+                print('===> Saving models...')
+                torch.save(snn.module.state_dict(),
+                         './'+save_folder+'/'+str(int(bestacc))+'.pkl')
+

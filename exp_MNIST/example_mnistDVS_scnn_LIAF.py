@@ -3,13 +3,10 @@
 from __future__ import print_function
 import sys
 sys.path.append("..")
-import LIAF
 from LIAFnet.LIAFResNet import *
 from datasets.dvs_mnist import DVS_MNIST_Dataset
-
 import torch.distributed as dist 
 import torch.nn as nn
-
 import argparse, pickle, time, os
 
 from importlib import import_module
@@ -40,7 +37,7 @@ print(local_rank,' is ready')
 workpath = os.path.abspath(os.getcwd())
 
 num_classes = 10
-batch_size  = 4
+batch_size  = 5
 
 train_dataset = DVS_MNIST_Dataset(mode='train',scale = 4,data_set_path='/data/MNIST_DVS_mat/',timestep = 50)
 test_dataset = DVS_MNIST_Dataset(mode='test',scale = 4,data_set_path='/data/MNIST_DVS_mat/',timestep = 50)
@@ -55,7 +52,7 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, s
 
 best_acc = 0  # best test accuracy
 start_epoch = 0  # start from epoch 0 or last checkpoint epoch
-timeWindows= 50
+timeWindows= 25
 learning_rate = 1e-2
 num_epochs = 30         # max epoch
 modules = import_module('LIAFnet.LIAFCNN')
@@ -145,7 +142,7 @@ for epoch in range(num_epochs):
         for batch_idx, (images, labels) in enumerate(test_loader):
             images = images.to(device)
             optimizer.zero_grad()
-            outputs = snn(inputs)
+            outputs = snn(images)
             loss = criterion(outputs.cpu(), labels)
             _, predicted = outputs.cpu().max(1)
             total += float(labels.size(0))
