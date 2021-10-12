@@ -12,11 +12,6 @@ import math
 import numpy as np
 import random
 
-# pytorch>1.6.0
-from torch.cuda.amp import autocast
-import TA
-
-
 seed_value = 1   # 设定随机数种子
 np.random.seed(seed_value)
 random.seed(seed_value)
@@ -25,13 +20,77 @@ torch.manual_seed(seed_value)           # 为CPU设置随机种子
 torch.cuda.manual_seed(seed_value)      # 为当前GPU设置随机种子（只用一块GPU）
 torch.cuda.manual_seed_all(seed_value)  # 为所有GPU设置随机种子（多块GPU）
 torch.backends.cudnn.deterministic = True
-
 dtype = torch.float
 allow_print = False
-# TODO
-# 1. LIFactFun  配置激活函数的参数
-# 2. Baseneuron 配置可训练的参数
 
+############################################
+# update 07-26
+# 加入注意力机制
+############################################
+import TA
+
+############################################
+# autocast 需要pytorch>3.6.0
+############################################
+import sys
+__USE_AUTO_CAST__ = False 
+if sys.version_info.minor>=6:
+    __USE_AUTO_CAST__ = True
+    print('use torch.cuda.amp.autocast for fusion prcision training')
+
+def autocast():
+    class null_cast:
+        def __enter__(self):
+            pass
+        def __exit__(self,exc_type,exc_val,exc_tb):
+            pass
+    if __USE_AUTO_CAST__:
+        from torch.cuda.amp import autocast
+        return autocast()
+    else:
+        return null_cast()
+
+############################################
+# update 08-30
+# 加入全局配置接口
+############################################    
+def config_LIAF(args):
+    if len(args)==0:
+        return 0
+    # 配置激活函数
+    if 'use_rect_approx' in args:
+        LIFactFun.use_rect_approx = args['use_rect_approx']
+        LIFactFun.use_gause_approx = not LIFactFun.use_rect_approx
+    if 'use_gause_approx' in args:
+        LIFactFun.use_gause_approx = args['use_gause_approx']
+        LIFactFun.use_rect_approx = not LIFactFun.use_gause_approx
+        
+    # 配置基本神经元
+    if 'thresh_trainable' in args:
+        BaseNeuron.thresh_trainable = args['thresh_trainable']
+    if 'decay_trainable' in args:
+        BaseNeuron.decay_trainable = args['decay_trainable']
+    if 'use_td_batchnorm' in args:
+        BaseNeuron.use_td_batchnorm = args['use_td_batchnorm']
+    if 'if_clamp_the_output' in args:
+        BaseNeuron.if_clamp_the_output = args['if_clamp_the_output']
+    if 'save_featuremap' in args:
+        BaseNeuron.save_featuremap = args['save_featuremap']
+        
+    if 'allow_print' in args:
+        allow_print = args['allow_print']
+    if 'dtype' in args:
+        dtype = args['dtype']
+        
+    if 'seed_value' in args:
+        seed_value = args['seed_value']
+        np.random.seed(seed_value)
+        random.seed(seed_value)
+        os.environ['PYTHONHASHSEED'] = str(seed_value)  # 为了禁止hash随机化，使得实验可复现。
+        torch.manual_seed(seed_value)           # 为CPU设置随机种子
+        torch.cuda.manual_seed(seed_value)      # 为当前GPU设置随机种子（只用一块GPU）
+        torch.cuda.manual_seed_all(seed_value)  # 为所有GPU设置随机种子（多块GPU）
+        torch.backends.cudnn.deterministic = True
 
 #######################################################
 # activation
@@ -39,12 +98,13 @@ allow_print = False
 # For 2 value-quantified approximation of δ(x)
 # LIF激活函数
 #######################################################    
+
 class LIFactFun(torch.autograd.Function):
     lens = 0.5      # LIF激活函数的梯度近似参数，越小则梯度激活区域越窄
     bias = -0.2     # 多阈值激活函数的值域平移参数                            
     sigma = 1       # 高斯梯度近似时的sigma
-    use_rect_approx = False # 选择方梯度近似方法
-    use_gause_approx = True # 选择高斯梯度近似方法
+    use_rect_approx = False # 选择方梯度近似方法【Switch Flag】
+    use_gause_approx = True # 选择高斯梯度近似方法【Switch Flag】
     def __init__(self):
         super(LIFactFun, self).__init__()
 
@@ -92,7 +152,6 @@ def paramInit(model,method='kaiming'):
             else:
                 pass
             
-            
 #######################################################
 # cells 
 # LIF神经元
@@ -100,16 +159,22 @@ def paramInit(model,method='kaiming'):
 # 阈值按ARLIF的训练方法
 # decay使用sigmoid归一化
 # FC处理2维输入，Conv处理4维输入
+# update: 2021-08-25
+# author: Linyh
 #######################################################
 class BaseNeuron(nn.Module):
     
+    # For advanced training【Switch Flag】
     fire_rate_upperbound = 0.8
     fire_rate_lowebound  = 0.2
     thresh_trainable = False
     decay_trainable = True
-    use_td_batchnorm = False
+    use_td_batchnorm = False 
+    
+    # For Debug【Switch Flag】
+    if_clamp_the_output = True
     save_featuremap = False
-
+    
     def __init__(self):
         super().__init__()
         
@@ -142,47 +207,62 @@ class BaseNeuron(nn.Module):
           
     # 输入突触连接为conv层 输入维度为[B,C,T,W,H] 或者 [B,T,N]
     def mem_update(self,x,init_mem=None,spikeAct = LIFactFun.apply):
-        
         dim = len(x.size())
-        output = torch.zeros_like(x)
-        mem_old= 0
-        
         if dim == 5:
-            spike = torch.zeros_like(x[:,:,0,:,:])
-            time_window = x.size(2)
-            mem = x[:,:,0,:,:]
-        elif dim == 3:
-            spike = torch.zeros_like(x[:,0,:]) 
-            time_window = x.size(1)
-            mem = x[:,0,:]
+            output = self.__5Dmem_update(x,init_mem,spikeAct)
+        if dim == 3:
+            output = self.__3Dmem_update(x,init_mem,spikeAct)      
+        if BaseNeuron.if_clamp_the_output:#[beta] 实验ReLU1
+            output = output.clamp_(0.0, 1.0)
+        return output
+          
+    # 输入突触连接为conv层 输入维度为[B,C,T,W,H] 或者 [B,T,N]
+    def __5Dmem_update(self,x,init_mem=None,spikeAct = LIFactFun.apply):
+        mem_old= 0
+        time_window = x.size(2)
+        mem = x[:,:,0,:,:]
+        outputs = torch.zeros_like(x)
         if init_mem is not None:
             mem = init_v 
-        for i in range(time_window):
-            if i>=1 and dim == 5:
-                mem = mem_old * self.norm_decay(self.decay)*(1 - spike.detach()) + x[:,:,i,:,:]
-            elif i>=1 and dim == 3:
-                mem = mem_old * self.norm_decay(self.decay)*(1 - spike.detach()) + x[:,i,:]
+        for t in range(time_window):
+            if t>=1:
+                mem = mem_old * self.norm_decay(self.decay)*(1 - spike.detach()) + x[:,:,t,:,:]
             mem_old = mem.clone()
             spike = spikeAct(mem_old,self.thresh) 
             self.cal_fire_rate_and_thresh_update(mem_old,spike)
             if self.act:
-                if dim == 3:
-                    if self.actFun == LIFactFun.apply:
-                        output[:,i,:] = self.actFun(mem_old,self.thresh) 
-                    else:
-                        output[:,i,:] = self.actFun(mem_old) 
-                elif dim == 5 :
-                    if self.actFun == LIFactFun.apply:
-                        output[:,:,i,:,:] = self.actFun(mem_old,self.thresh) 
-                    else:
-                        output[:,:,i,:,:] = self.actFun(mem_old) 
+                if self.actFun == LIFactFun.apply:
+                    output = self.actFun(mem_old,self.thresh)
+                else:
+                    output = self.actFun(mem_old)
             else:
-                if dim == 3:
-                    output[:,i,:] = mem_old
-                elif dim == 5 :
-                    output[:,:,i,:,:] = mem_old
-        return output
+                output = mem_old
+            outputs[:,:,t,:,:] = output
 
+        return outputs
+    
+    def __3Dmem_update(self,x,init_mem=None,spikeAct = LIFactFun.apply):
+        mem_old= 0
+        time_window = x.size(1)
+        mem = x[:,0,:]
+        outputs = torch.zeros_like(x)
+        if init_mem is not None:
+            mem = init_v 
+        for t in range(time_window):
+            if t>=1:
+                mem = mem_old * self.norm_decay(self.decay)*(1 - spike.detach()) + x[:,t,:]
+            mem_old = mem.clone()
+            spike = spikeAct(mem_old,self.thresh) 
+            self.cal_fire_rate_and_thresh_update(mem_old,spike)
+            if self.act:
+                if self.actFun == LIFactFun.apply:
+                    output = self.actFun(mem_old,self.thresh)
+                else:
+                    output = self.actFun(mem_old)
+            else:
+                output = mem_old
+            outputs[:,t,:] = output
+        return outputs
     
 #######################################################    
 # 【复合的LIAF神经元，突触连接：linear】
@@ -194,10 +274,11 @@ class BaseNeuron(nn.Module):
 #         x_{n+1} = analogfun(v_t')
 #         v_t = v_t' * (1-f) * t
 # 用法：torch_network.add_module(name,LIAF.LIAFCell())
-# update: 2020-02-29
+# update: 2021-08-20
 # author: Linyh
 #######################################################
 class LIAFCell(BaseNeuron):
+    
     def __init__(self,
         inputSize,
         hiddenSize,
@@ -272,7 +353,6 @@ class LIAFCell(BaseNeuron):
         return output
     
 
-    
 #######################################################    
 # 【复合的LIAF神经元，突触连接：linear】
 #standard LIAF-RNN cell based on LIAFcell
@@ -282,7 +362,7 @@ class LIAFCell(BaseNeuron):
 #         f = spikefun(v_t')
 #         x_{n+1} = analogfun(v_t')
 #         v_t = v_t' * (1-f) * t
-#update: 2020-03-21
+#update: 2021-08-23
 #author: Linyh
 #######################################################
 class LIAFRCell(BaseNeuron):
@@ -303,35 +383,32 @@ class LIAFRCell(BaseNeuron):
         @param useBatchNorm: if use
         '''
         super().__init__()
-        self.inputSize = inputSize
-        self.hiddenSize = hiddenSize
-        
-        self.actFun = actFun
-        self.timeWindows = timeWindows
-        self.spikeActFun = LIFactFun.apply
-        self.useBatchNorm = useBatchNorm
-        self.UseDropOut = True
+        self.inputSize = inputSize              
+        self.hiddenSize = hiddenSize       
+        self.actFun = actFun                
+        self.spikeActFun = LIFactFun.apply  
+        self.useBatchNorm = useBatchNorm    
         self.batchSize = None
-        
-        # block 1. add synaptic inputs: Wx+b=y
-        self.kernel=nn.Linear(inputSize, hiddenSize)
+        self.timeWindows = None
+        # block 1：add synaptic inputs: Wx+b=y
+        self.kernel=nn.Linear(inputSize, hiddenSize)    
         paramInit(self.kernel,init_method)
         self.kernel_v = nn.Linear(hiddenSize, hiddenSize)
         paramInit(self.kernel_v,init_method)
-
-        # block 2. add a BN layer
+        # block 2： add a BN layer(optional)
         if self.useBatchNorm:
-            if BaseNeuron.use_td_batchnorm:
-                self.NormLayer = thBN.BatchNorm1d(hiddenSize)
-            else:
-                self.NormLayer = nn.BatchNorm1d(hiddenSize)
-
-        # block 3. use dropout
+            self.NormLayer = nn.BatchNorm1d(hiddenSize)
+        # block 3： use dropout
         self.UseDropOut = False
-        self.DPLayer = nn.Dropout(dropOut)
-        if 0 < dropOut < 1:  # enable drop_out in cell
+        self.DPLayer = nn.Dropout(dropOut)             
+        if 0 < dropOut < 1: 
             self.UseDropOut = True
-
+        
+        self.featuremap = None # 存储中间输出的Feature Map 用于可视化
+        self.fire_rate = None  # 存储激活率
+        self.thresh =  0.5
+        self.decay =torch.nn.Parameter(torch.ones(1) * 0.5, requires_grad=BaseNeuron.decay_trainable)
+        
     def forward(self,
         input,
         init_v=None):
@@ -341,42 +418,34 @@ class LIAFRCell(BaseNeuron):
         """
         #step 0: init
         with autocast():
-            sum_of_elements = 1
-            for i in input.size():
-                sum_of_elements *= i
-            self.fire_rate = input.sum()/sum_of_elements
-
             self.device = self.kernel.weight.device
-            if self.timeWindows != input.size(1):
-                print('wrong num of time intervals')
-            if input.device != self.device:
-                input = input.to(self.device)
-
-            self.batchSize = input.size()[0]#adaptive for mul-gpu training
-            output_init = torch.zeros(self.batchSize,self.timeWindows,self.hiddenSize,device=self.device,dtype=dtype)
-            output_fired = torch.zeros(self.batchSize,self.timeWindows,self.hiddenSize,device=self.device,dtype=dtype)
+            if data.device != self.device:
+                data = data.to(self.device)
+            self.batchSize = data.size(0)#adaptive for mul-gpu training
+            self.timeWindows = data.size(1)
+            synaptic_input = torch.zeros(self.batchSize,self.timeWindows,self.hiddenSize,device=self.device,dtype=dtype)
             # Step 1: accumulate 
             for time in range(self.timeWindows):
-                event_frame_t = input[:,time,:].float().to(self.device)
-                event_frame_t = event_frame_t.view(self.batchSize, -1)
-                output_init[:,time,:] = self.kernel(event_frame_t)
-            # Step 2: Normalization 
-            normed_v = output_init
+                synaptic_input[:,time,:] = self.kernel(data[:,time,:].view(self.batchSize, -1))
+                if self.useBatchNorm:
+                    synaptic_input[:,time,:] = self.NormLayer(synaptic_input[:,time,:])
+            if BaseNeuron.save_featuremap:
+                self.featuremap = synaptic_input # 暂存特征图
             if self.useBatchNorm:
-                normed_v = self.NormLayer(output_init)
+                for time in range(self.timeWindows):
+                    synaptic_input[:,time,:] = self.NormLayer(synaptic_input[:,time,:]) 
+            # Step 3: update membrane
             if v is None:#initialization of V
                 if init_v is None:
-                    v = torch.zeros(self.batchSize, self.hiddenSize, device=event_frame_t.device,dtype=dtype)
+                    v = torch.zeros(self.batchSize, self.hiddenSize, device=self.device)
                 else:
                     v = init_v   
             for time in range(self.timeWindows):
                 v = normed_v[:,time,:] + self.kernel_v(v)
-                # Step 2: Fire and leaky 
                 fire = self.spikeActFun(v)
                 output = self.actFun(v)
                 output_fired[:,time,:] = output
-                v = self.decay * (1 - fire) * v
-            # step 4: DropOut
+                v = self.decay * (1 - fire.detach()) * v
             if self.UseDropOut:
                 output_fired = self.DPLayer(output_fired)
         return output_fired
@@ -448,7 +517,6 @@ class LIAFConvCell(BaseNeuron):
         self.useBatchNorm= useBatchNorm
         self.usePool= usePool
         self.inputSize = inputSize
-        
         self.outChannel = outChannels
         self.layer_index = 0
         self.p_method  = p_method
@@ -461,9 +529,7 @@ class LIAFConvCell(BaseNeuron):
         self.timeWindows = None
         
         # block 1. conv layer:
-        self.kernel = nn.Conv2d(inChannels,
-                                outChannels,
-                                self.kernelSize,
+        self.kernel = nn.Conv2d(inChannels,outChannels,self.kernelSize,
                                 stride=self.stride,
                                 padding= self.padding,
                                 dilation=self.dilation,
@@ -472,7 +538,6 @@ class LIAFConvCell(BaseNeuron):
                                 padding_mode='zeros')
         paramInit(self.kernel,init_method)
         # block 2. add a attetion layer
-        
         
         if attention_model is not None:
             self.att_module = attention_model(timeWindows=TA.timeWindows, channels = outChannels)
@@ -512,7 +577,7 @@ class LIAFConvCell(BaseNeuron):
         self.__with_lif_neuron = True
         
     def forward(self,
-                input,
+                input_data,
                 init_v=None):
         """
         @param input: a tensor of of shape (B, C，T, H，W)
@@ -522,66 +587,57 @@ class LIAFConvCell(BaseNeuron):
         """
         #step 0: init
         with autocast():
-            self.timeWindows = input.size(2)
-            self.batchSize=input.size(0)
+            self.timeWindows = input_data.size(2)
+            self.batchSize = input_data.size(0)
             self.device = self.kernel.weight.device      
-            if input.device != self.device:
-                input = input.to(self.device) 
+            if input_data.device != self.device:
+                input_data = input_data.to(self.device) 
 
-            synaptic_input = torch.zeros(self.batchSize,self.outChannel, self.timeWindows, 
+            synaptic_inputs = torch.zeros(self.batchSize,self.outChannel, self.timeWindows, 
                         self.CSize[0], self.CSize[1],device=self.device,dtype=dtype)
 
             # Step 1: conv and accumulate 
             for time in range(self.timeWindows):
-                synaptic_input[:,:,time,:,:] = self.kernel(input[:,:,time,:,:].to(self.device))
-                
+                synaptic_inputs[:,:,time,:,:] = self.kernel(input_data[:,:,time,:,:].to(self.device))
+   
             # step 1.5: attention
             if self.att_module is not None:
-                synaptic_input = synaptic_input.permute(0,2,1,3,4)
-                synaptic_input = self.att_module(synaptic_input)#(B, T, C, H，W)
-                synaptic_input = synaptic_input.permute(0,2,1,3,4)
+                synaptic_inputs = synaptic_inputs.permute(0,2,1,3,4)
+                synaptic_inputs = self.att_module(synaptic_inputs)#(B, T, C, H，W)
+                synaptic_inputs = synaptic_inputs.permute(0,2,1,3,4)
 
             # Step 2: Normalization 
             if self.useBatchNorm:
-                synaptic_input = self.NormLayer(synaptic_input)
+                synaptic_inputs = self.NormLayer(synaptic_inputs)
 
-            # Step 3: LIF
-            if self.__with_lif_neuron:
-                output = self.mem_update(synaptic_input)
-
-            # Step 4: Pooling
-            if  self.usePool:
-                output_pool = torch.zeros(self.batchSize,self.outChannel, self.timeWindows, 
-                        self.outputSize[0], self.outputSize[1],device=self.device,dtype=dtype)
+            # Step 3: POOLING 
+            if self.usePool:
+                pooled_inputs = torch.zeros(self.batchSize,self.outChannel, self.timeWindows, 
+                                    self.outputSize[0], self.outputSize[1],device=self.device,dtype=dtype)  
                 for time in range(self.timeWindows):
                     if self.p_method == 'max':
-                        output_pool[:,:,time,:,:] = F.max_pool2d(output[:,:,time,:,:], kernel_size=self.p_kernelSize,
+                        pooled_inputs[:,:,time,:,:] = F.max_pool2d(synaptic_inputs[:,:,time,:,:], kernel_size=self.p_kernelSize,
                         stride = self.p_stride,padding=self.p_padding)
                     else:
-                        output_pool[:,:,time,:,:] = F.avg_pool2d(output[:,:,time,:,:], kernel_size=self.p_kernelSize,
+                        pooled_inputs[:,:,time,:,:] = F.avg_pool2d(synaptic_inputs[:,:,time,:,:], kernel_size=self.p_kernelSize,
                         stride = self.p_stride,padding=self.p_padding)
             else:
-                output_pool = output
-                
+                pooled_inputs = synaptic_inputs
+                        
+            # Step 4: LIF
+            if self.__with_lif_neuron:
+                output = self.mem_update(pooled_inputs)
 
-            # step 5: DropOut
-            if self.UseDropOut:
-                output_pool = self.DPLayer(output_pool)
-                
             if BaseNeuron.save_featuremap:    
-                self.featuremap_pooled = synaptic_input
+                self.featuremap_pooled = output
 
-                
-        return output_pool
-
+        return output
 
 #######################################################    
 # ResBlock for ResNet18/34
 # 简介: 基于LIAF-CNN的残差块
 # standard LIAF cell based on LIFcell
 # update: 2020-08-10
-# author: Linyh
-# update: 2020-02-29
 # author: Linyh
 #######################################################
 
@@ -662,7 +718,7 @@ class LIAFResBlock(BaseNeuron):
         if allow_print:
             print('the output feature map is'+str(self.outputSize))
             
-    def forward(self,input):
+    def forward(self,input_data):
         '''
         设计网络的规则：
         1.对于输出feature map大小相同的层，有相同数量的filters，即channel数相同；
@@ -672,11 +728,11 @@ class LIAFResBlock(BaseNeuron):
             乘以W矩阵投影到新的空间。实现是用1x1卷积实现的，直接改变1x1卷积的filters数目。这种会增加参数。
         '''
         with autocast():
-            self.timeWindows = input.size(2)
-            self.batchSize = input.size(0)
-            shortcut_output = input
+            self.timeWindows = input_data.size(2)
+            self.batchSize = input_data.size(0)
             
-            cv1_output = self.cv1(input)
+            
+            cv1_output = self.cv1(input_data)
             if BaseNeuron.save_featuremap:
                 self.featuremap1 = cv1_output
             cv2_output = self.cv2(cv1_output)
@@ -684,17 +740,143 @@ class LIAFResBlock(BaseNeuron):
             if self.downSample:
                 shortcut_output = torch.zeros(cv2_output.size(),device=cv2_output.device)
                 for time in range(self.timeWindows):
-                    shortcut_output[:,:,time,:,:] = self.shortcut(input[:,:,time,:,:])
-            shortcut_output = self.shortcut_norm(shortcut_output)
-            
-            output = self.actFun(cv2_output+shortcut_output)
-            output = self.mem_update(output)
+                    shortcut_output[:,:,time,:,:] = self.shortcut(input_data[:,:,time,:,:])
+                shortcut_output = self.shortcut_norm(shortcut_output)
+            else:
+                shortcut_output = input_data
+
+            output = self.mem_update(cv2_output+shortcut_output)
 
             if BaseNeuron.save_featuremap:
                 self.featuremap2 = output
         return output
 
     
+#######################################################    
+# ResBlock for ResNet18/34
+# 简介: 基于LIAF-CNN的残差块
+# standard LIAF cell based on LIFcell
+# update: 2021-09-02
+# author: Linyh & hyf
+#######################################################
+
+class LIAFResBlock_LIF(BaseNeuron):
+    expansion = 1
+    def __init__(self,
+                 inChannels,
+                 outChannels,
+                 kernelSize=(3,3),
+                 stride=1,
+                 padding=1,
+                 dilation=1,
+                 groups=1,
+                 actFun=LIFactFun.apply,
+                 useBatchNorm = False,
+                 attention_model = None,
+                 inputSize=(224,224),
+                 name = 'liafres'
+                 ):
+
+        super().__init__()
+        self.padding=padding
+        self.actFun=actFun
+        self.useBatchNorm = useBatchNorm
+        self.kernelSize=kernelSize
+        self.timeWindows= None
+        self.downSample=False
+        self.shortcut = None
+
+        if inChannels!=outChannels:
+            #判断残差类型——>输入输出是否具有相同维度
+            stride = 2
+            self.downSample = True
+            #print(name +' dimension changed')  
+            self.shortcut = nn.Conv2d(inChannels, outChannels, kernel_size=1, stride=2)
+        else:
+            stride = 1
+
+        self.cv1 = LIAFConvCell(inChannels=inChannels,
+                                    outChannels=outChannels,
+                                    kernelSize=kernelSize,
+                                    stride = stride,
+                                    padding =1,
+                                    dilation= 1,
+                                    groups= 1,
+                                    inputSize = inputSize,
+                                    dropOut =0,
+                                    attention_model=attention_model,
+                                    useBatchNorm = True,
+                                    act = False,
+                                    usePool= False)
+        self.cv2 = LIAFConvCell(inChannels=outChannels,
+                                    outChannels=outChannels,
+                                    kernelSize=kernelSize,
+                                    stride = 1,
+                                    padding = 1,
+                                    dilation= 1,
+                                    groups=1,
+                                    inputSize = self.cv1.outputSize,
+                                    dropOut =0,
+                                    attention_model=attention_model,
+                                    useBatchNorm = True,
+                                    act = False,
+                                    usePool= False)
+        self.cv1.__with_lif_neuron = False
+        self.cv2.__with_lif_neuron = False
+        
+        if self.useBatchNorm:
+            if BaseNeuron.use_td_batchnorm:
+                self.shortcut_norm = thBN.BatchNorm3d(outChannels)
+                self.shortcut_norm.k = 8
+            else:
+                self.shortcut_norm = nn.BatchNorm3d(outChannels)
+                
+        self.outputSize = self.cv2.outputSize
+        self.featuremap1 = None
+        self.featuremap2 = None
+        
+        if allow_print:
+            print('the output feature map is'+str(self.outputSize))
+            
+    def forward(self,input_data):
+        '''
+        设计网络的规则：
+        1.对于输出feature map大小相同的层，有相同数量的filters，即channel数相同；
+        2. 当feature map大小减半时（池化），filters(channel)数量翻倍。
+            对于残差网络，维度匹配的shortcut连接为实线，反之为虚线。维度不匹配时，同等映射有两种可选方案：  
+            直接通过zero padding 来增加维度（channel）。
+            乘以W矩阵投影到新的空间。实现是用1x1卷积实现的，直接改变1x1卷积的filters数目。这种会增加参数。
+        '''
+        with autocast():
+
+            self.timeWindows = input_data.size(2)
+            self.batchSize = input_data.size(0)
+            
+            cv1_input = self.cv1.mem_update(input_data)
+            cv1_output = self.cv1(cv1_input)
+
+            if BaseNeuron.save_featuremap:
+                self.featuremap1 = cv1_output
+
+            cv2_input = self.cv2.mem_update(cv1_output)
+            cv2_output = self.cv2(cv2_input)
+
+            if self.downSample:
+                shortcut_output = torch.zeros_like(cv2_output,device=cv2_output.device)
+                for time in range(self.timeWindows):
+                    shortcut_output[:,:,time,:,:] = self.shortcut(input_data[:,:,time,:,:])
+                shortcut_output = self.shortcut_norm(shortcut_output)
+            else:
+                shortcut_output = input_data
+        
+            if BaseNeuron.save_featuremap:
+                self.featuremap2 = output
+
+            output = cv2_output+shortcut_output
+
+        return output
+
+
 #######################################################    
 # ResNeck for ResNet50+
 # 简介: 基于LIAF-CNN的残差块

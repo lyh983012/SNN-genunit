@@ -10,7 +10,9 @@ import os
 import math
 import util.thBN as thBN
 from LIAF import *
-from torch.cuda.amp import autocast
+import LIAF
+autocast = LIAF.autocast
+
 
 #ResNet
 class LIAFResNet(nn.Module):
@@ -101,7 +103,7 @@ class LIAFResNet(nn.Module):
             self.layer2 = self._make_layer_50(self.block, 128, self.cfgRes[1], stride=2)
             self.layer3 = self._make_layer_50(self.block, 256, self.cfgRes[2], stride=2)
             self.layer4 = self._make_layer_50(self.block, 512, self.cfgRes[3], stride=2)   # different
-        elif self.block is LIAFResBlock:
+        elif self.block is LIAFResBlock or LIAFResBlock_LIF:
             self.layer1 = self._make_layer(self.block, 64, 64, self.cfgRes[0])
             self.layer2 = self._make_layer(self.block, 64, 128, self.cfgRes[1], stride=2)
             self.layer3 = self._make_layer(self.block, 128, 256, self.cfgRes[2], stride=2)
@@ -128,8 +130,8 @@ class LIAFResNet(nn.Module):
     def forward(self,input):
         with autocast():
             self.device  = self.fc.weight.device
-            self.batchSize=input.size(0)
-            self.timeWindows=input.size(2)
+            self.batchSize=input.size()[0]
+            self.timeWindows=input.size()[2]
             if input.device != self.device:
                 input = input.to(self.device)
             if self._data_sparse:

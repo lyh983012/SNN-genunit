@@ -6,9 +6,9 @@ import torch.nn.functional as F
 import math
 import numpy as np
 import LIAF
-from torch.cuda.amp import autocast
-
 print_model = False
+
+autocast = LIAF.autocast
 
 #########################################################
 '''general_configs'''
@@ -162,11 +162,12 @@ class LIAFCNN(nn.Module):
             output = frames
 
             for layer in self.network:
-                if isinstance(layer, LIAF.LIAFCell):
+                if isinstance(layer, LIAF.LIAFCell) and len(output.size())>3:
+                    output = output.permute(0,2,1,3,4)
                     output = output.view(self.batchSize,self.timeWindows,-1)
                 output = layer(output)
 
             outputmean = output.mean(dim=1)
             if self.onlyLast:
                 outputmean = output[:,-1,:]
-        return outputmean.float()
+        return outputmean

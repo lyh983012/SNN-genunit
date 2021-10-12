@@ -26,7 +26,7 @@ class Config(object):
         self.batch_size = 22                                           # mini-batch大小，部分demo不是在这里设置
         self.Qbit=0                                                     # 是否使用多阈值函数（>2支持，Qbit的值实际上是阈值个数）
         '''cfg for net'''
-        self.block = LIAFResBlock
+        self.block = LIAFResBlock_LIF # 原来是：LIAFResBlock
         self.num_classes = 1000
         self.cfgCnn = [2,64,7]
         self.cfgRes = [2,2,2,2]
@@ -38,6 +38,6 @@ class Config(object):
         self._data_sparse= False
         self.padding= 0
         self.dataSize= [224,224]
-        self.attention_model = None
+        
 
 

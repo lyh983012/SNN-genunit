@@ -39,6 +39,5 @@ class Config(object):
         self._data_sparse= False
         self.padding= 0
         self.dataSize= [224,224]
-        self.attention_model = None
 
 
