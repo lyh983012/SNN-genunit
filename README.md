@@ -1,2 +1,2 @@
 # SNN-genunit
-LIAF-SNN impolementation
+LIAF-SNN implementation
