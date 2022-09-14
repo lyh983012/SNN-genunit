@@ -2,7 +2,7 @@
 
 LIAF-SNN implementation
 
-Part of the code is used in Paper [LIAF-Net: Leaky Integrate and Analog Fire Network for Lightweight and Efficient Spatiotemporal Information Processing](https://ieeexplore.ieee.org/abstract/document/9429228)
+Some of the codes are used in Paper [LIAF-Net: Leaky Integrate and Analog Fire Network for Lightweight and Efficient Spatiotemporal Information Processing](https://ieeexplore.ieee.org/abstract/document/9429228)
 
 ## Citation
 If you find this code useful in your research, please consider citing and here is an example BibTeX entry:
